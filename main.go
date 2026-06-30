@@ -1,16 +1,33 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/Joseap1996/Chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	db             *database.Queries
+	platform       string
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 func handleValidate(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +69,43 @@ func handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Eml string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	response := parameters{}
+	err := decoder.Decode(&response)
+	if err != nil {
+		msg := "error decoding json"
+		respondWithError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Email:     response.Eml,
+	})
+
+	if err != nil {
+		msg := "error creating user"
+		respondWithError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	returnVals := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusCreated, returnVals)
+
+}
+
 func (cfg *apiConfig) handleHits(w http.ResponseWriter, r *http.Request) {
 	hits := cfg.fileserverHits.Load()
 	str := fmt.Sprintf("Welcome, Chirpy Admin\nChirpy has been visited %d times!", hits)
@@ -61,10 +115,23 @@ func (cfg *apiConfig) handleHits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleHitsReset(w http.ResponseWriter, r *http.Request) {
-	cfg.fileserverHits.Store(0)
+	if cfg.platform != "dev" {
+		w.Header().Add("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(403)
+		w.Write([]byte("Forbidden"))
+		return
+	}
+
+	err := cfg.db.DeleteUsers(r.Context())
+	if err != nil {
+		log.Printf("Error deleting users: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Something went wrong"))
+		return
+	}
 	w.Header().Add("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
-	w.Write([]byte("Hits reset to 0."))
+	w.Write([]byte("Users deleted."))
 
 }
 
@@ -123,7 +190,18 @@ func removeBadWords(msg string) string {
 }
 
 func main() {
-	apiCon := apiConfig{}
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		fmt.Println(err)
+	}
+	dbQueries := database.New(db)
+
+	apiCon := apiConfig{
+		db:       dbQueries,
+		platform: platform}
 	serveMux := http.NewServeMux()
 	serveStruct := http.Server{}
 	serveStruct.Addr = ":8080"
@@ -135,6 +213,7 @@ func main() {
 	serveMux.HandleFunc("GET /admin/metrics", apiCon.handleHits)
 	serveMux.HandleFunc("POST /admin/reset", apiCon.handleHitsReset)
 	serveMux.HandleFunc("POST /api/validate_chirp", handleValidate)
+	serveMux.HandleFunc("POST /api/users", apiCon.handleUsers)
 
 	if err := serveStruct.ListenAndServe(); err != nil {
 		fmt.Println(err)
