@@ -29,10 +29,18 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 }
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
 
-func handleValidate(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body string `json:"body"`
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -51,16 +59,49 @@ func handleValidate(w http.ResponseWriter, r *http.Request) {
 	msg := params.Body
 	cleanedBody := removeBadWords(msg)
 
-	type returnVal struct {
-		CleanedBody string `json:"cleaned_body"`
+	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Body:      cleanedBody,
+		UserID:    params.UserID,
+	})
+	if err != nil {
+		msg := "Error creating chirp"
+		respondWithError(w, http.StatusInternalServerError, msg)
+		return
 	}
 
-	respBody := returnVal{
-		CleanedBody: cleanedBody,
+	respBody := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
 	}
 
+	respondWithJSON(w, http.StatusCreated, respBody)
+
+}
+
+func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.db.GetChirps(r.Context())
+	if err != nil {
+		msg := "Error getting chirps"
+		respondWithError(w, http.StatusInternalServerError, msg)
+		return
+	}
+	respBody := []Chirp{}
+	for _, chirp := range chirps {
+		respBody = append(respBody, Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		})
+	}
 	respondWithJSON(w, http.StatusOK, respBody)
-
 }
 
 func handleEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -212,8 +253,9 @@ func main() {
 	serveMux.HandleFunc("GET /api/healthz", handleEndpoint)
 	serveMux.HandleFunc("GET /admin/metrics", apiCon.handleHits)
 	serveMux.HandleFunc("POST /admin/reset", apiCon.handleHitsReset)
-	serveMux.HandleFunc("POST /api/validate_chirp", handleValidate)
 	serveMux.HandleFunc("POST /api/users", apiCon.handleUsers)
+	serveMux.HandleFunc("POST /api/chirps", apiCon.handleChirps)
+	serveMux.HandleFunc("GET /api/chirps", apiCon.handleGetChirps)
 
 	if err := serveStruct.ListenAndServe(); err != nil {
 		fmt.Println(err)
