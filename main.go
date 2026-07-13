@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Joseap1996/Chirpy/internal/auth"
 	"github.com/Joseap1996/Chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -24,11 +25,13 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID             uuid.UUID `json:"id"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Email          string    `json:"email"`
+	HashedPassword string    `json:"hashed_password"`
 }
+
 type Chirp struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -104,6 +107,33 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, respBody)
 }
 
+func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
+	chirpIDString := r.PathValue("id")
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		msg := "Invalid id"
+		respondWithError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		msg := "Error getting chirp"
+		respondWithError(w, http.StatusNotFound, msg)
+		return
+	}
+	respBody := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	respondWithJSON(w, http.StatusOK, respBody)
+
+}
+
 func handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
@@ -112,7 +142,8 @@ func handleEndpoint(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Eml string `json:"email"`
+		Password string `json:"password"`
+		Eml      string `json:"email"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	response := parameters{}
@@ -122,12 +153,19 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, msg)
 		return
 	}
+	hashed_password, err := auth.HashPassword(response.Password)
+	if err != nil {
+		msg := "Error hashing password"
+		respondWithError(w, http.StatusBadRequest, msg)
+		return
+	}
 
 	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
-		ID:        uuid.New(),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Email:     response.Eml,
+		ID:             uuid.New(),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Email:          response.Eml,
+		HashedPassword: hashed_password,
 	})
 
 	if err != nil {
@@ -147,6 +185,42 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Eml      string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	response := parameters{}
+	err := decoder.Decode(&response)
+	if err != nil {
+		msg := "error decoding json"
+		respondWithError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	user, err := cfg.db.GetUser(r.Context(), response.Eml)
+	if err != nil {
+		msg := "Incorrect email or password"
+		respondWithError(w, http.StatusUnauthorized, msg)
+		return
+	}
+	match, err := auth.CheckPasswordHash(response.Password, user.HashedPassword)
+	if err != nil || !match {
+		msg := "Incorrect email or password"
+		respondWithError(w, http.StatusUnauthorized, msg)
+		return
+	}
+
+	returnVals := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, returnVals)
+}
 func (cfg *apiConfig) handleHits(w http.ResponseWriter, r *http.Request) {
 	hits := cfg.fileserverHits.Load()
 	str := fmt.Sprintf("Welcome, Chirpy Admin\nChirpy has been visited %d times!", hits)
@@ -256,6 +330,8 @@ func main() {
 	serveMux.HandleFunc("POST /api/users", apiCon.handleUsers)
 	serveMux.HandleFunc("POST /api/chirps", apiCon.handleChirps)
 	serveMux.HandleFunc("GET /api/chirps", apiCon.handleGetChirps)
+	serveMux.HandleFunc("GET /api/chirps/{id}", apiCon.handleGetChirp)
+	serveMux.HandleFunc("POST /api/login", apiCon.handleLogin)
 
 	if err := serveStruct.ListenAndServe(); err != nil {
 		fmt.Println(err)
